@@ -130,6 +130,331 @@ GROUP BY platform;
 -----
 
 ### Phần 3: Giải pháp với Hadoop MapReduce (Java)
+// File: com/example/hadoop/common/CSVUtils.java
+package com.example.hadoop.common;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class CSVUtils {
+    // Simple CSV parser supporting quoted fields
+    public static List<String> parseLine(String line) {
+        List<String> result = new ArrayList<>();
+        if (line == null || line.isEmpty()) return result;
+        StringBuilder cur = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (ch == '"') {
+                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    cur.append('"'); // escaped quote
+                    i++;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (ch == ',' && !inQuotes) {
+                result.add(cur.toString());
+                cur.setLength(0);
+            } else {
+                cur.append(ch);
+            }
+        }
+        result.add(cur.toString());
+        return result;
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/filter/FilterMapper.java
+package com.example.hadoop.filter;
+
+import com.example.hadoop.common.CSVUtils;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Mapper;
+
+import java.io.IOException;
+import java.util.List;
+
+public class FilterMapper extends Mapper<LongWritable, Text, Text, Text> {
+    private String[] headers = null;
+    private String filterColumn = null;
+    private String filterValue = null;
+    private int filterIdx = -1;
+    private boolean skipHeader = true;
+
+    @Override
+    protected void setup(Context context) throws IOException, InterruptedException {
+        filterColumn = context.getConfiguration().get("filter.column");
+        filterValue = context.getConfiguration().get("filter.value");
+        String headerLine = context.getConfiguration().get("input.header.line");
+        if (headerLine != null) {
+            headers = CSVUtils.parseLine(headerLine).toArray(new String[0]);
+            for (int i = 0; i < headers.length; i++) {
+                if (headers[i].trim().equalsIgnoreCase(filterColumn)) {
+                    filterIdx = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    @Override
+    protected void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
+        String line = value.toString();
+        // Skip header if configured
+        if (skipHeader && key.get() == 0 && line.toLowerCase().contains("date") && line.toLowerCase().contains("product")) {
+            return;
+        }
+        List<String> cols = CSVUtils.parseLine(line);
+        if (filterIdx >= 0 && filterIdx < cols.size()) {
+            String v = cols.get(filterIdx);
+            if (v != null && v.equalsIgnoreCase(filterValue)) {
+                context.write(new Text("match"), new Text(line));
+            }
+        }
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/filter/FilterDriver.java
+package com.example.hadoop.filter;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+
+public class FilterDriver {
+    public static void main(String[] args) throws Exception {
+        if (args.length < 5) {
+            System.err.println("Usage: FilterDriver <input> <output> <filterColumn> <filterValue> <headerLine>");
+            System.exit(2);
+        }
+        Configuration conf = new Configuration();
+        conf.set("filter.column", args[2]);
+        conf.set("filter.value", args[3]);
+        conf.set("input.header.line", args[4]);
+
+        Job job = Job.getInstance(conf, "CSV Filter Job");
+        job.setJarByClass(FilterDriver.class);
+
+        job.setMapperClass(FilterMapper.class);
+        job.setNumReduceTasks(0); // mapper-only job outputs matching lines
+
+        TextInputFormat.addInputPath(job, new Path(args[0]));
+        TextOutputFormat.setOutputPath(job, new Path(args[1]));
+
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(Text.class);
+
+        FileSystem.get(conf).delete(new Path(args[1]), true);
+        System.exit(job.waitForCompletion(true) ? 0 : 1);
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/revenue/RevenueMapper.java
+package com.example.hadoop.revenue;
+
+import com.example.hadoop.common.CSVUtils;
+import org.apache.hadoop.io.DoubleWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Mapper;
+
+import java.io.IOException;
+import java.util.List;
+
+public class RevenueMapper extends Mapper<Object, Text, Text, DoubleWritable> {
+    private String[] headers = null;
+    private int productIdx = -1;
+    private int revenueIdx = -1;
+
+    @Override
+    protected void setup(Context context) throws IOException, InterruptedException {
+        String headerLine = context.getConfiguration().get("input.header.line");
+        if (headerLine != null) {
+            headers = CSVUtils.parseLine(headerLine).toArray(new String[0]);
+            for (int i = 0; i < headers.length; i++) {
+                String h = headers[i].trim().toLowerCase();
+                if (h.equals("product name") || h.equals("product_name") || h.equals("product")) productIdx = i;
+                if (h.equals("revenue")) revenueIdx = i;
+            }
+        }
+    }
+
+    @Override
+    protected void map(Object key, Text value, Context context) throws IOException, InterruptedException {
+        String line = value.toString();
+        if (line.toLowerCase().startsWith("date,")) return; // skip header
+        List<String> cols = CSVUtils.parseLine(line);
+        if (productIdx >= 0 && revenueIdx >= 0 && productIdx < cols.size() && revenueIdx < cols.size()) {
+            String product = cols.get(productIdx);
+            String revenueStr = cols.get(revenueIdx).replaceAll("[^"]+" , "");
+            // try parsing revenue safely
+            double revenue = 0.0;
+            try {
+                revenue = Double.parseDouble(cols.get(revenueIdx));
+            } catch (Exception e) {
+                // try removing currency symbols
+                String cleaned = cols.get(revenueIdx).replaceAll("[^0-9.\\-]", "");
+                if (!cleaned.isEmpty()) {
+                    try { revenue = Double.parseDouble(cleaned); } catch (Exception ex) { revenue = 0.0; }
+                }
+            }
+            context.write(new Text(product), new DoubleWritable(revenue));
+        }
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/revenue/RevenueReducer.java
+package com.example.hadoop.revenue;
+
+import org.apache.hadoop.io.DoubleWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Reducer;
+
+import java.io.IOException;
+
+public class RevenueReducer extends Reducer<Text, DoubleWritable, Text, DoubleWritable> {
+    @Override
+    protected void reduce(Text key, Iterable<DoubleWritable> values, Context context) throws IOException, InterruptedException {
+        double sum = 0.0;
+        for (DoubleWritable v : values) sum += v.get();
+        context.write(key, new DoubleWritable(sum));
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/revenue/RevenueDriver.java
+package com.example.hadoop.revenue;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.DoubleWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+
+public class RevenueDriver {
+    public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("Usage: RevenueDriver <input> <output> <headerLine>");
+            System.exit(2);
+        }
+        Configuration conf = new Configuration();
+        conf.set("input.header.line", args[2]);
+
+        Job job = Job.getInstance(conf, "Revenue Sum per Product");
+        job.setJarByClass(RevenueDriver.class);
+
+        job.setMapperClass(RevenueMapper.class);
+        job.setReducerClass(RevenueReducer.class);
+
+        TextInputFormat.addInputPath(job, new Path(args[0]));
+        TextOutputFormat.setOutputPath(job, new Path(args[1]));
+
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(DoubleWritable.class);
+
+        FileSystem.get(conf).delete(new Path(args[1]), true);
+        System.exit(job.waitForCompletion(true) ? 0 : 1);
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/returns/ReturnsMapper.java
+package com.example.hadoop.returns;
+
+import com.example.hadoop.common.CSVUtils;
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Mapper;
+
+import java.io.IOException;
+import java.util.List;
+
+public class ReturnsMapper extends Mapper<Object, Text, Text, IntWritable> {
+    private int productIdx = -1;
+    private int unitsReturnedIdx = -1;
+    private String[] headers = null;
+
+    @Override
+    protected void setup(Context context) throws IOException, InterruptedException {
+        String headerLine = context.getConfiguration().get("input.header.line");
+        if (headerLine != null) {
+            headers = CSVUtils.parseLine(headerLine).toArray(new String[0]);
+            for (int i = 0; i < headers.length; i++) {
+                String h = headers[i].trim().toLowerCase();
+                if (h.equals("product name") || h.equals("product_name") || h.equals("product")) productIdx = i;
+                if (h.equals("units returned") || h.equals("units_returned")) unitsReturnedIdx = i;
+            }
+        }
+    }
+
+    @Override
+    protected void map(Object key, Text value, Context context) throws IOException, InterruptedException {
+        String line = value.toString();
+        if (line.toLowerCase().startsWith("date,")) return;
+        List<String> cols = CSVUtils.parseLine(line);
+        if (productIdx >= 0 && unitsReturnedIdx >= 0 && productIdx < cols.size() && unitsReturnedIdx < cols.size()) {
+            String product = cols.get(productIdx);
+            int returned = 0;
+            try { returned = Integer.parseInt(cols.get(unitsReturnedIdx)); } catch (Exception e) { returned = 0; }
+            context.write(new Text(product), new IntWritable(returned));
+        }
+    }
+}
+
+// ======================================================
+// File: com/example/hadoop/returns/ReturnsReducer.java
+package com.example.hadoop.returns;
+
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Reducer;
+
+import java.io.IOException;
+
+public class ReturnsReducer extends Reducer<Text, IntWritable, Text, IntWritable> {
+    @Override
+    protected void reduce(Text key, Iterable<IntWritable> values, Context context) throws IOException, InterruptedException {
+        int sum = 0;
+        for (IntWritable v : values) sum += v.get();
+        context.write(key, new IntWritable(sum));
+    }
+}
+
+// ======================================================
+// File: README_RUN.txt
+/*
+Usage examples (after building a JAR with these classes):
+
+1) Filter rows where Category == "Supplements":
+   hadoop jar yourjar.jar com.example.hadoop.filter.FilterDriver \
+      /input/path /output/filter Category Supplements "Date,Product Name,Category,Units Sold,Price,Revenue,Discount,Units Returned,Location,Platform"
+
+2) Sum revenue per product:
+   hadoop jar yourjar.jar com.example.hadoop.revenue.RevenueDriver \
+      /input/path /output/revenue "Date,Product Name,Category,Units Sold,Price,Revenue,Discount,Units Returned,Location,Platform"
+
+3) Count returned units per product:
+   hadoop jar yourjar.jar com.example.hadoop.returns.ReturnsDriver \
+      /input/path /output/returns "Date,Product Name,Category,Units Sold,Price,Revenue,Discount,Units Returned,Location,Platform"
+
+Notes:
+- Each driver expects the CSV header line as an argument so the mapper can locate fields by name.
+- You can extend the parsers to support different delimiters or additional cleanup of numeric fields.
+- Consider adding a Combiner for revenue and returns to reduce network traffic.
+- For performance, convert CSV to SequenceFile or Parquet and use Hadoop MapReduce or Spark for larger datasets.
+*/
+
 
 Bài toán MapReduce: **"Tính tổng doanh thu (Revenue) cho từng Danh mục (Category)"**.
 
