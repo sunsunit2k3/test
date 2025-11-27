@@ -454,6 +454,62 @@ Notes:
 - Consider adding a Combiner for revenue and returns to reduce network traffic.
 - For performance, convert CSV to SequenceFile or Parquet and use Hadoop MapReduce or Spark for larger datasets.
 */
+package com.example.hadoop;
+
+import com.example.hadoop.CSVUtils;
+import org.apache.hadoop.io.DoubleWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Mapper;
+
+import java.io.IOException;
+import java.util.List;
+
+public class RevenueMapper extends Mapper<Object, Text, Text, DoubleWritable> {
+    private String[] headers = null;
+    private int productIdx = -1;
+    private int revenueIdx = -1;
+
+    @Override
+    protected void setup(Context context) throws IOException, InterruptedException {
+        String headerLine = context.getConfiguration().get("input.header.line");
+        if (headerLine != null) {
+            headers = CSVUtils.parseLine(headerLine).toArray(new String[0]);
+            for (int i = 0; i < headers.length; i++) {
+                String h = headers[i].trim().toLowerCase();
+                if (h.equals("product name") || h.equals("product_name") || h.equals("product")) productIdx = i;
+                if (h.equals("revenue")) revenueIdx = i;
+            }
+        }
+    }
+
+    @Override
+    protected void map(Object key, Text value, Context context) throws IOException, InterruptedException {
+        String line = value.toString();
+        if (line.toLowerCase().startsWith("date,")) return; // skip header
+
+        List<String> cols = CSVUtils.parseLine(line);
+
+        if (productIdx >= 0 && revenueIdx >= 0 && productIdx < cols.size() && revenueIdx < cols.size()) {
+
+            String product = cols.get(productIdx).trim();
+
+            // Clean revenue (remove $, commas, spaces…)
+            String revenueClean = cols.get(revenueIdx).replaceAll("[^0-9.\\-]", "");
+
+            double revenue = 0.0;
+
+            try {
+                if (!revenueClean.isEmpty()) {
+                    revenue = Double.parseDouble(revenueClean);
+                }
+            } catch (Exception e) {
+                revenue = 0.0;
+            }
+
+            context.write(new Text(product), new DoubleWritable(revenue));
+        }
+    }
+}
 
 
 Bài toán MapReduce: **"Tính tổng doanh thu (Revenue) cho từng Danh mục (Category)"**.
