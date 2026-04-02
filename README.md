@@ -68,27 +68,23 @@ Chúng ta sẽ tạo bảng và thực hiện 3 câu truy vấn mẫu tương t�
 ```sql
 
 CREATE EXTERNAL TABLE IF NOT EXISTS sales_raw (
-    sale_date STRING,       -- Đổi thành STRING để tránh lỗi NULL date
+    sale_date STRING,
     product_name STRING,
     category STRING,
-    units_sold STRING,      -- Đổi thành STRING
-    price STRING,           -- Đổi thành STRING
-    revenue STRING,         -- Đổi thành STRING
-    discount STRING,        -- Đổi thành STRING
-    units_returned STRING,  -- Đổi thành STRING
+    units_sold INT,
+    price DOUBLE,
+    revenue DOUBLE,
+    discount DOUBLE,
+    units_returned INT,
     location STRING,
     platform STRING
 )
-ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde' -- Dùng thư viện này xử lý tốt hơn dấu phẩy và ngoặc kép
-WITH SERDEPROPERTIES (
-   "separatorChar" = ",",
-   "quoteChar"     = "\"",
-   "escapeChar"    = "\\"
-)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'         -- TAB-separated file
 STORED AS TEXTFILE
 LOCATION '/user/data/sales'
 TBLPROPERTIES ("skip.header.line.count"="1");
--- Lưu ý: Cần bỏ dòng header trong file CSV trước khi upload hoặc dùng tblproperties("skip.header.line.count"="1")
+
 ```
 
 package com.example.hadoop;
